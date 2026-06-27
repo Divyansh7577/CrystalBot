@@ -360,7 +360,7 @@ class MasterBot(commands.Bot):
 bot = MasterBot()
 
 
-@bot.before_interaction
+@bot.tree.before_interaction
 async def check_bot_toggle(interaction: discord.Interaction):
     if not get_bot_active():
         await interaction.response.send_message(
