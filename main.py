@@ -1,92 +1,30 @@
 import asyncio
 import datetime
 import json
+import logging
 import os
 import re
 import sys
-import uuid
-import logging
 import unicodedata
-from threading import Thread
+import uuid
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-from flask import Flask, render_template_string, jsonify, request
 
-# ── LOGGING SETUP ─────────────────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO)
+# ── LOGGING ───────────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("discord_bot.main")
 
-# ── GLOBAL CONFIG & DATA INTERNALLY FUSED ──────────────────────────────────────
-STAFF_ROLE_NAMES = ["👑 | Owner", "🥈 | Co-Owner", "🛠️ | Admin", "🛡️ | Moderator", "🤝 | Helper"]
-SUPPORT_CATEGORY_NAME = "🎫┃SUPPORT AREA"
-WELCOME_CHANNEL_NAME = "📢┃announcements"
-GAMER_ROLE_NAME = "🎮 | Gamer"
-OWNER_ROLE_NAME = "👑 | Owner"
-STAFF_LOG_CHANNEL = "🪵┃staff-logs"
-
-SERVER_LAYOUT_DATA = {
-    "roles": [
-        {"name": "👑 | Owner", "color": 0xffd700, "permissions": "administrator"},
-        {"name": "🥈 | Co-Owner", "color": 0xc0c0c0, "permissions": "manage_server"},
-        {"name": "🛠️ | Admin", "color": 0xff4500, "permissions": "moderate"},
-        {"name": "🛡️ | Moderator", "color": 0x1e90ff, "permissions": "moderate"},
-        {"name": "🤝 | Helper", "color": 0x32cd32, "permissions": "member"},
-        {"name": "🎮 | Gamer", "color": 0x00ffff, "permissions": "member", "hoist": False}
-    ],
-    "categories": [
-        {
-            "name": "📌┃INFORMATION",
-            "channels": [
-                {"name": "📜┃rules", "readonly": True, "topic": "Server rules and regulations."},
-                {"name": "📢┃announcements", "readonly": True, "topic": "Official announcements."},
-                {"name": "🎁┃giveaways", "readonly": True, "topic": "Server giveaways and events."}
-            ]
-        },
-        {
-            "name": "💬┃CHATS",
-            "channels": [
-                {"name": "💬┃main-chat", "topic": "General chat for everyone."},
-                {"name": "🏹┃mc-chat", "topic": "Discuss anything about Minecraft!"},
-                {"name": "🤖┃bot-commands", "topic": "Spam bot commands here."}
-            ]
-        },
-        {
-            "name": "🪵┃STAFF ZONE",
-            "staff_only": True,
-            "channels": [
-                {"name": "🪵┃staff-logs", "topic": "All automatic moderation actions log here."},
-                {"name": "💬┃staff-chat", "topic": "Private lounge for Crystal Ville staff."},
-                {"name": "🔊┃Staff Meeting", "type": "voice"}
-            ]
-        },
-        {
-            "name": "🔊┃VOICE CHANNELS",
-            "channels": [
-                {"name": "🔊┃Duo VC 1", "type": "voice", "user_limit": 2},
-                {"name": "🔊┃Duo VC 2", "type": "voice", "user_limit": 2},
-                {"name": "🔊┃Squad VC 1", "type": "voice", "user_limit": 4},
-                {"name": "🔊┃Squad VC 2", "type": "voice", "user_limit": 4},
-                {"name": "🔊┃Penta VC 1", "type": "voice", "user_limit": 5}
-            ]
-        }
-    ]
-}
-
+# ── DATA / STATE PERSISTENCE ─────────────────────────────────────────────────
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-_LOG_FILE = os.path.join(DATA_DIR, "activity_log.json")
+_STATE_FILE = os.path.join(DATA_DIR, "runtime_state.json")
 _CONFIG_FILE = os.path.join(DATA_DIR, "bot_config.json")
 _MODLOGS_FILE = os.path.join(DATA_DIR, "modlogs_config.json")
 _HISTORY_FILE = os.path.join(DATA_DIR, "modlogs_history.json")
 PANELS_FILE = os.path.join(DATA_DIR, "ticket_panels.json")
-_STATE_FILE = os.path.join(DATA_DIR, "runtime_state.json")
-
-_MAX_ENTRIES = 2000
-OPTION_EMOJIS = ["⚙️", "🚫", "🔍", "🤝", "🎮", "📋", "💬", "🔔", "🛠️", "📩"]
-ACTION_EMOJI = {"warn": "⚠️", "timeout": "⏳", "kick": "👢", "ban": "🔨", "untimeout": "🕊️", "unban": "✅", "role": "🏷️"}
 
 
 def _load_json(filepath, default_factory=dict):
@@ -104,29 +42,81 @@ def _save_json(filepath, data):
         json.dump(data, f, indent=2)
 
 
-# ── MASTER ON/OFF SWITCH ───────────────────────────────────────────────────────
-# Persisted to disk so the dashboard toggle survives a reboot, and read fresh
-# each time so the Flask thread and the bot's asyncio loop always agree.
 def get_bot_active() -> bool:
     return _load_json(_STATE_FILE, dict).get("active", True)
 
 
 def set_bot_active(value: bool) -> None:
-    state = _load_json(_STATE_FILE, dict)
-    state["active"] = bool(value)
-    _save_json(_STATE_FILE, state)
+    _save_json(_STATE_FILE, {"active": bool(value)})
 
 
-if not os.path.exists(_STATE_FILE):
-    set_bot_active(True)
+# ── GLOBAL CONFIG / SERVER LAYOUT ────────────────────────────────────────────
+STAFF_ROLE_NAMES = ["👑 | Owner", "🥈 | Co-Owner", "🛠️ | Admin", "🛡️ | Moderator", "🤝 | Helper"]
+SUPPORT_CATEGORY_NAME = "🎫┃SUPPORT AREA"
+WELCOME_CHANNEL_NAME = "📢┃announcements"
+GAMER_ROLE_NAME = "🎮 | Gamer"
+STAFF_LOG_CHANNEL = "🪵┃staff-logs"
+
+OPTION_EMOJIS = ["⚙️", "🚫", "🔍", "🤝", "🎮", "📋", "💬", "🔔", "🛠️", "📩"]
+ACTION_EMOJI = {"warn": "⚠️", "timeout": "⏳", "kick": "👢", "ban": "🔨", "untimeout": "🕊️", "unban": "✅", "role": "🏷️"}
+_MAX_ENTRIES = 2000
+
+SERVER_LAYOUT_DATA = {
+    "roles": [
+        {"name": "👑 | Owner", "color": 0xffd700, "permissions": "administrator"},
+        {"name": "🥈 | Co-Owner", "color": 0xc0c0c0, "permissions": "manage_server"},
+        {"name": "🛠️ | Admin", "color": 0xff4500, "permissions": "moderate"},
+        {"name": "🛡️ | Moderator", "color": 0x1e90ff, "permissions": "moderate"},
+        {"name": "🤝 | Helper", "color": 0x32cd32, "permissions": "member"},
+        {"name": "🎮 | Gamer", "color": 0x00ffff, "permissions": "member", "hoist": False},
+    ],
+    "categories": [
+        {
+            "name": "📌┃INFORMATION",
+            "channels": [
+                {"name": "📜┃rules", "readonly": True, "topic": "Server rules and regulations."},
+                {"name": "📢┃announcements", "readonly": True, "topic": "Official announcements."},
+                {"name": "🎁┃giveaways", "readonly": True, "topic": "Server giveaways and events."},
+            ],
+        },
+        {
+            "name": "💬┃CHATS",
+            "channels": [
+                {"name": "💬┃main-chat", "topic": "General chat for everyone."},
+                {"name": "🏹┃mc-chat", "topic": "Discuss anything about Minecraft!"},
+                {"name": "🤖┃bot-commands", "topic": "Spam bot commands here."},
+            ],
+        },
+        {
+            "name": "🪵┃STAFF ZONE",
+            "staff_only": True,
+            "channels": [
+                {"name": "🪵┃staff-logs", "topic": "All automatic moderation actions log here."},
+                {"name": "💬┃staff-chat", "topic": "Private lounge for staff."},
+                {"name": "🔊┃Staff Meeting", "type": "voice"},
+            ],
+        },
+        {
+            "name": "🔊┃VOICE CHANNELS",
+            "channels": [
+                {"name": "🔊┃Duo VC 1", "type": "voice", "user_limit": 2},
+                {"name": "🔊┃Duo VC 2", "type": "voice", "user_limit": 2},
+                {"name": "🔊┃Squad VC 1", "type": "voice", "user_limit": 4},
+                {"name": "🔊┃Squad VC 2", "type": "voice", "user_limit": 4},
+                {"name": "🔊┃Penta VC 1", "type": "voice", "user_limit": 5},
+            ],
+        },
+    ],
+}
 
 
 def append_activity_entry(entry: dict) -> None:
-    entries = _load_json(_LOG_FILE, list)
+    log_file = os.path.join(DATA_DIR, "activity_log.json")
+    entries = _load_json(log_file, list)
     entries.append(entry)
     if len(entries) > _MAX_ENTRIES:
         entries = entries[-_MAX_ENTRIES:]
-    _save_json(_LOG_FILE, entries)
+    _save_json(log_file, entries)
 
 
 def _make_activity_entry(interaction: discord.Interaction, status: str, detail: str = "") -> dict:
@@ -228,6 +218,7 @@ def ban_embed(target, mod, reason: str, dm_ok: bool) -> discord.Embed:
     return e
 
 
+# ── TICKET SYSTEM ─────────────────────────────────────────────────────────────
 class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -293,9 +284,12 @@ class DynamicTicketView(discord.ui.View):
         self.add_item(select)
 
     async def _on_select(self, interaction: discord.Interaction):
+        # Direct inline check — runs synchronously as the first statement in
+        # this callback, so there's no race against anything else.
         if not get_bot_active():
             return await interaction.response.send_message(
-                "❌ System is currently turned OFF from the master console dashboard.", ephemeral=True)
+                "❌ System is currently turned OFF from maintenance mode.", ephemeral=True)
+
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
         user = interaction.user
@@ -341,6 +335,7 @@ class DynamicTicketView(discord.ui.View):
         await interaction.followup.send(f"✅ Your ticket is open: {ch.mention}", ephemeral=True)
 
 
+# ── BOT CLASS ─────────────────────────────────────────────────────────────────
 class MasterBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -349,62 +344,88 @@ class MasterBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Re-register persistent views so buttons/selects keep working after restarts.
+        # Re-register persistent views so ticket buttons/selects survive restarts.
         self.add_view(TicketControlView())
         panels = _load_json(PANELS_FILE)
         for key, opts in panels.items():
             self.add_view(DynamicTicketView(opts))
-        logger.info("Persistent global interaction views successfully hooked (%d ticket panel(s)).", len(panels))
+        logger.info("Persistent views hooked (%d ticket panel(s)).", len(panels))
 
 
 bot = MasterBot()
 
 
-@bot.tree.before_interaction
-async def check_bot_toggle(interaction: discord.Interaction):
+# ── GLOBAL INTERACTION GATE (component interactions, not slash commands) ─────
+# Slash commands are gated individually below via app_commands.check, which is
+# race-free against the command tree's own dispatch. on_interaction here
+# covers anything routed outside that path; ticket components also carry
+# their own inline check (see DynamicTicketView._on_select) since that check
+# runs synchronously inside the same callback and can't race itself.
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    if interaction.type == discord.InteractionType.application_command:
+        return  # handled by maintenance_check() on each command
+
     if not get_bot_active():
-        await interaction.response.send_message(
-            "🛑 **System Maintenance:** The bot core has been flipped OFF from the master dashboard console.",
-            ephemeral=True)
-        raise app_commands.AppCommandError("Bot is flagged inactive.")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "🛑 **System Maintenance:** The bot is currently OFF.", ephemeral=True
+                )
+        except Exception:
+            pass
 
 
+def maintenance_check():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if not get_bot_active():
+            await interaction.response.send_message(
+                "🛑 **System Maintenance:** The bot core is currently OFF. Use `/maintenance` to turn it back on.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    return app_commands.check(predicate)
+
+
+# ── ERROR HANDLING ────────────────────────────────────────────────────────────
 @bot.tree.error
 async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    detail = str(error)
-    if "Bot is flagged inactive" in detail:
+    if isinstance(error, app_commands.CheckFailure):
+        logger.info("Blocked command from %s: %s", interaction.user, error)
         return
+
     try:
-        append_activity_entry(_make_activity_entry(interaction, status="error", detail=detail))
+        append_activity_entry(_make_activity_entry(interaction, status="error", detail=str(error)))
     except Exception:
         pass
-    msg = f"❌ An error occurred: `{detail[:200]}`"
+
+    logger.exception("Unhandled app command error", exc_info=error)
+    msg = f"❌ Something went wrong running that command: `{str(error)[:200]}`"
     try:
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
     except Exception:
-        pass
+        logger.warning("Could not deliver error message — interaction likely expired.")
 
 
 @bot.event
-async def on_interaction(interaction: discord.Interaction):
-    if interaction.type != discord.InteractionType.application_command:
-        return
-    try:
-        append_activity_entry(_make_activity_entry(interaction, status="success"))
-    except Exception:
-        pass
+async def on_error(event_method, *args, **kwargs):
+    logger.exception("Unhandled error in event handler: %s", event_method)
 
 
+# ── LIFECYCLE ─────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    logger.info("⚡ %s online & synced successfully!", bot.user.name)
+    logger.info("⚡ Logged in as %s (ID: %s)", bot.user, bot.user.id)
     try:
-        await bot.tree.sync()
-    except Exception as e:
-        logger.error("Sync crash: %s", e)
+        synced = await bot.tree.sync()
+        logger.info("Synced %d application command(s).", len(synced))
+    except Exception:
+        logger.exception("Slash command sync failed.")
 
     cfg_data = _load_json(_CONFIG_FILE)
     for gid, data in cfg_data.items():
@@ -443,9 +464,11 @@ async def on_member_join(member: discord.Member):
         await ch.send(embed=em)
 
 
+# ── COMMANDS: SETUP ───────────────────────────────────────────────────────────
 @bot.tree.command(name="setup", description="Rebuild the complete professional gaming server setup from scratch.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.guild_only()
+@maintenance_check()
 async def slash_setup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
     guild = interaction.guild
@@ -498,9 +521,11 @@ async def slash_setup(interaction: discord.Interaction):
     await interaction.followup.send("✅ Infrastructure compiled and setup complete!", ephemeral=True)
 
 
+# ── COMMANDS: TICKETS ─────────────────────────────────────────────────────────
 @bot.tree.command(name="setup_ticket", description="Deploy a custom drop-down ticketing pane onto a channel.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.guild_only()
+@maintenance_check()
 async def slash_setup_ticket(interaction: discord.Interaction, channel: discord.TextChannel,
                               embed_title: str, embed_description: str, options_comma_separated: str):
     opts = [o.strip() for o in options_comma_separated.split(",") if o.strip()]
@@ -520,9 +545,11 @@ async def slash_setup_ticket(interaction: discord.Interaction, channel: discord.
     await interaction.response.send_message("✅ Dynamic dropdown ticket terminal launched!", ephemeral=True)
 
 
+# ── COMMANDS: MODERATION ──────────────────────────────────────────────────────
 @bot.tree.command(name="warn", description="Issue an accountability notice to a member.")
 @app_commands.default_permissions(moderate_members=True)
 @app_commands.guild_only()
+@maintenance_check()
 async def slash_warn(interaction: discord.Interaction, member: discord.Member, reason: str):
     if member.bot:
         return await interaction.response.send_message("❌ Target identification error: Bots bypass protocols.", ephemeral=True)
@@ -544,6 +571,7 @@ async def slash_warn(interaction: discord.Interaction, member: discord.Member, r
 @bot.tree.command(name="timeout", description="Temporarily restrict a user's typing access.")
 @app_commands.default_permissions(moderate_members=True)
 @app_commands.guild_only()
+@maintenance_check()
 async def slash_timeout(interaction: discord.Interaction, member: discord.Member,
                          duration_minutes: app_commands.Range[int, 1, 40320], reason: str = "No reason stated"):
     if member.bot or member.top_role >= interaction.user.top_role:
@@ -563,6 +591,7 @@ async def slash_timeout(interaction: discord.Interaction, member: discord.Member
 @bot.tree.command(name="kick", description="Eject a problematic account from the matrix.")
 @app_commands.default_permissions(kick_members=True)
 @app_commands.guild_only()
+@maintenance_check()
 async def slash_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason stated"):
     if member.bot or member.top_role >= interaction.user.top_role:
         return await interaction.response.send_message("❌ Exception: Role parity prevents ejection.", ephemeral=True)
@@ -580,6 +609,7 @@ async def slash_kick(interaction: discord.Interaction, member: discord.Member, r
 @bot.tree.command(name="ban", description="Blacklist a profile permanently from returning.")
 @app_commands.default_permissions(ban_members=True)
 @app_commands.guild_only()
+@maintenance_check()
 async def slash_ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason stated"):
     if member.bot or member.top_role >= interaction.user.top_role:
         return await interaction.response.send_message("❌ Authorization denied: Upper bound hierarchy restriction.", ephemeral=True)
@@ -603,6 +633,7 @@ async def slash_ban(interaction: discord.Interaction, member: discord.Member, re
 @app_commands.default_permissions(administrator=True)
 @app_commands.guild_only()
 @app_commands.choices(role_name=[app_commands.Choice(name=n, value=n) for n in STAFF_ROLE_NAMES + [GAMER_ROLE_NAME]])
+@maintenance_check()
 async def slash_role(interaction: discord.Interaction, member: discord.Member, role_name: str):
     r = discord.utils.get(interaction.guild.roles, name=role_name)
     if not r:
@@ -622,6 +653,7 @@ async def slash_role(interaction: discord.Interaction, member: discord.Member, r
 @bot.tree.command(name="modlogs", description="Audit past behavioral records on an account.")
 @app_commands.default_permissions(moderate_members=True)
 @app_commands.guild_only()
+@maintenance_check()
 async def slash_modlogs(interaction: discord.Interaction, member: discord.Member):
     records = _get_history(interaction.guild.id, member.id)
     em = discord.Embed(title=f"📋 Historical Audit — {member.display_name}", color=discord.Color.blurple())
@@ -639,6 +671,7 @@ async def slash_modlogs(interaction: discord.Interaction, member: discord.Member
 @bot.tree.command(name="bot_config", description="Modify system environment names natively.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.guild_only()
+@maintenance_check()
 async def slash_bot_config(interaction: discord.Interaction, nickname: str = ""):
     new_nick = nickname.strip() or None
     await interaction.guild.me.edit(nick=new_nick)
@@ -655,188 +688,33 @@ async def slash_bot_config(interaction: discord.Interaction, nickname: str = "")
 async def slash_help(interaction: discord.Interaction):
     em = discord.Embed(
         title="🎮 Core Command Index Terminal",
-        description="`/setup` — Recompile full grid configuration.\n`/setup_ticket` — Mount a dropdown support anchor.\n`/role` — Direct priority role injection.\n`/warn` · `/timeout` · `/kick` · `/ban` — Protocol enforcement units.\n`/modlogs` — Check profile baseline behaviors.",
+        description="`/setup` — Recompile full grid configuration.\n`/setup_ticket` — Mount a dropdown support anchor.\n`/role` — Direct priority role injection.\n`/warn` · `/timeout` · `/kick` · `/ban` — Protocol enforcement units.\n`/modlogs` — Check profile baseline behaviors.\n`/maintenance` — Flip the master ON/OFF switch.",
         color=discord.Color.blurple())
     await interaction.response.send_message(embed=em, ephemeral=True)
 
 
-# ── FLASK OPERATIONAL DASHBOARD ────────────────────────────────────────────────
-app = Flask("dashboard")
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{{ bot_name }} · Operations Console</title>
-<style>
-  :root {
-    --bg: #0b0d12; --panel: #12151c; --border: #20242f;
-    --text: #e7e9ee; --muted: #8b92a3;
-    --accent: #5865f2; --good: #3ba55d; --bad: #ed4245; --warn: #faa61a;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: radial-gradient(circle at top, #161a23 0%, var(--bg) 60%);
-    color: var(--text); min-height: 100vh; padding: 32px 20px;
-  }
-  .wrap { max-width: 920px; margin: 0 auto; }
-  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 28px; flex-wrap: wrap; gap: 12px; }
-  h1 { font-size: 22px; margin: 0; font-weight: 600; }
-  h1 span { color: var(--muted); font-weight: 400; font-size: 14px; display: block; margin-top: 4px; }
-  .badge { padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
-  .badge.on { background: rgba(59,165,93,0.15); color: var(--good); border: 1px solid rgba(59,165,93,0.4); }
-  .badge.off { background: rgba(237,66,69,0.15); color: var(--bad); border: 1px solid rgba(237,66,69,0.4); }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 24px; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
-  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
-  .card .value { font-size: 26px; font-weight: 700; }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 22px; margin-bottom: 20px; }
-  .panel h2 { margin: 0 0 14px; font-size: 15px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-  .switch-row { display: flex; align-items: center; justify-content: space-between; }
-  .switch-row p { margin: 0; color: var(--muted); font-size: 13px; max-width: 480px; }
-  button.toggle {
-    border: none; padding: 12px 26px; border-radius: 10px; font-weight: 700; font-size: 14px;
-    cursor: pointer; transition: transform 0.1s, opacity 0.15s; color: #fff;
-  }
-  button.toggle:active { transform: scale(0.97); }
-  button.toggle.on { background: var(--bad); }
-  button.toggle.off { background: var(--good); }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; color: var(--muted); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; }
-  td { padding: 10px 10px; border-bottom: 1px solid var(--border); color: var(--text); }
-  tr:last-child td { border-bottom: none; }
-  .tag { padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; }
-  .tag.success { background: rgba(59,165,93,0.15); color: var(--good); }
-  .tag.error { background: rgba(237,66,69,0.15); color: var(--bad); }
-  .empty { color: var(--muted); text-align: center; padding: 24px; font-size: 13px; }
-  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 30px; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <header>
-    <h1>{{ bot_name }} <span>Operational Dashboard &amp; Uptime Endpoint</span></h1>
-    <span id="statusBadge" class="badge {{ 'on' if active else 'off' }}">
-      <span class="dot"></span><span id="statusText">{{ 'ONLINE' if active else 'OFFLINE' }}</span>
-    </span>
-  </header>
-
-  <div class="grid">
-    <div class="card"><div class="label">Total Interactions</div><div class="value">{{ total }}</div></div>
-    <div class="card"><div class="label">Errors Logged</div><div class="value">{{ errors }}</div></div>
-    <div class="card"><div class="label">Ticket Panels Deployed</div><div class="value">{{ panel_count }}</div></div>
-    <div class="card"><div class="label">Server Time (UTC)</div><div class="value" style="font-size:16px;">{{ now }}</div></div>
-  </div>
-
-  <div class="panel">
-    <h2>Master Control</h2>
-    <div class="switch-row">
-      <p>Flips the global system switch. While OFF, the bot ignores ticket selections, slash commands, and member-join automation, but stays connected to Discord.</p>
-      <button id="toggleBtn" class="toggle {{ 'on' if active else 'off' }}" onclick="toggleBot()">
-        {{ 'Turn OFF' if active else 'Turn ON' }}
-      </button>
-    </div>
-  </div>
-
-  <div class="panel">
-    <h2>Recent Activity</h2>
-    {% if entries %}
-    <table>
-      <thead><tr><th>Time (UTC)</th><th>Guild</th><th>User</th><th>Command</th><th>Status</th></tr></thead>
-      <tbody>
-        {% for e in entries %}
-        <tr>
-          <td>{{ e.timestamp[:19].replace('T', ' ') }}</td>
-          <td>{{ e.guild_name }}</td>
-          <td>{{ e.user_tag }}</td>
-          <td>{{ e.command or '—' }}</td>
-          <td><span class="tag {{ e.status }}">{{ e.status }}</span></td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    {% else %}
-    <div class="empty">No activity recorded yet.</div>
-    {% endif %}
-  </div>
-
-  <footer>Uptime landing page · refresh anytime to confirm the process is alive</footer>
-</div>
-
-<script>
-async function toggleBot() {
-  const btn = document.getElementById("toggleBtn");
-  btn.disabled = true;
-  const res = await fetch("/api/toggle", { method: "POST" });
-  const data = await res.json();
-  applyState(data.active);
-  btn.disabled = false;
-}
-function applyState(active) {
-  const badge = document.getElementById("statusBadge");
-  const text = document.getElementById("statusText");
-  const btn = document.getElementById("toggleBtn");
-  badge.className = "badge " + (active ? "on" : "off");
-  text.textContent = active ? "ONLINE" : "OFFLINE";
-  btn.className = "toggle " + (active ? "on" : "off");
-  btn.textContent = active ? "Turn OFF" : "Turn ON";
-}
-</script>
-</body>
-</html>
-"""
+# ── COMMANDS: MAINTENANCE TOGGLE ──────────────────────────────────────────────
+@bot.tree.command(name="maintenance", description="Toggle the bot's master ON/OFF maintenance switch.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+# Intentionally NOT gated by maintenance_check() — otherwise once the bot is
+# OFF, nobody could ever turn it back ON.
+async def slash_maintenance(interaction: discord.Interaction):
+    new_state = not get_bot_active()
+    set_bot_active(new_state)
+    status = "🟢 ON" if new_state else "🔴 OFF"
+    await interaction.response.send_message(f"System status is now **{status}**.", ephemeral=True)
 
 
-@app.route("/")
-def dashboard():
-    entries = list(reversed(_load_json(_LOG_FILE, list)))[:25]
-    all_entries = _load_json(_LOG_FILE, list)
-    panels = _load_json(PANELS_FILE)
-    return render_template_string(
-        HTML_TEMPLATE,
-        bot_name=(bot.user.name if bot.is_ready() and bot.user else "Discord Bot"),
-        active=get_bot_active(),
-        total=len(all_entries),
-        errors=sum(1 for e in all_entries if e.get("status") == "error"),
-        panel_count=len(panels),
-        now=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        entries=entries,
-    )
-
-
-@app.route("/api/status")
-def api_status():
-    return jsonify({"active": get_bot_active(), "ready": bot.is_ready()})
-
-
-@app.route("/api/toggle", methods=["POST"])
-def api_toggle():
-    set_bot_active(not get_bot_active())
-    return jsonify({"active": get_bot_active()})
-
-
-@app.route("/health")
-def health():
-    # Lightweight endpoint for uptime monitors (UptimeRobot, etc.)
-    return jsonify({"status": "ok", "bot_ready": bot.is_ready()}), 200
-
-
-def run_flask():
-    app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
-
-
+# ── ENTRYPOINT ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    TOKEN = os.environ.get("DISCORD_TOKEN")
+    TOKEN = os.getenv("DISCORD_TOKEN")
     if not TOKEN:
         logger.error("DISCORD_TOKEN environment variable is not set. Exiting.")
         sys.exit(1)
 
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("🌐 Flask dashboard running on port 8080")
-
-    bot.run(TOKEN)
+    try:
+        bot.run(TOKEN)
+    except Exception:
+        logger.exception("Fatal error while running the bot.")
+        sys.exit(1)
