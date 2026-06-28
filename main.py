@@ -7,10 +7,12 @@ import re
 import sys
 import unicodedata
 import uuid
+from threading import Thread
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from flask import Flask, jsonify
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -706,12 +708,43 @@ async def slash_maintenance(interaction: discord.Interaction):
     await interaction.response.send_message(f"System status is now **{status}**.", ephemeral=True)
 
 
+# ── BACKGROUND WEB SERVER (Render port-binding requirement) ──────────────────
+# Render's free/web-service tier kills the deploy with "Port scan timeout
+# reached" if nothing binds to a port within the boot window. Discord bots
+# don't naturally listen on anything, so this tiny Flask app exists purely to
+# satisfy that health check — it runs in a daemon thread alongside the bot.
+web_app = Flask("keepalive")
+
+
+@web_app.route("/")
+def index():
+    return jsonify({
+        "status": "ok",
+        "bot_ready": bot.is_ready(),
+        "maintenance_active": get_bot_active(),
+    })
+
+
+@web_app.route("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+
 # ── ENTRYPOINT ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     TOKEN = os.getenv("DISCORD_TOKEN")
     if not TOKEN:
         logger.error("DISCORD_TOKEN environment variable is not set. Exiting.")
         sys.exit(1)
+
+    web_thread = Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+    logger.info("🌐 Web server thread started — Render port check will now pass.")
 
     try:
         bot.run(TOKEN)
